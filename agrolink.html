@@ -1,0 +1,856 @@
+import { useState, useEffect, useMemo } from "react";
+import {
+  getAuth,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  sendPasswordResetEmail,
+  signOut as firebaseSignOut,
+  onAuthStateChanged,
+} from "firebase/auth";
+import {
+  getFirestore,
+  collection, doc, setDoc, getDoc, getDocs,
+  addDoc, updateDoc, query, where, orderBy, serverTimestamp,
+} from "firebase/firestore";
+import { initializeApp } from "firebase/app";
+
+/* ── Firebase config ── */
+const firebaseConfig = {
+  apiKey:            "AIzaSyCGwNzS-zkrQVd7QhSg_zesEXvGCNGAaTA",
+  authDomain:        "agrolink-e392f.firebaseapp.com",
+  projectId:         "agrolink-e392f",
+  storageBucket:     "agrolink-e392f.firebasestorage.app",
+  messagingSenderId: "885772380353",
+  appId:             "1:885772380353:web:d5190fe9de661248d4cc40"
+};
+const app  = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db   = getFirestore(app);
+
+/* ── DB helpers ── */
+async function getProfile(uid)       { const s = await getDoc(doc(db,"profiles",uid)); return s.exists()?s.data():null; }
+async function saveProfile(uid,data) { await setDoc(doc(db,"profiles",uid),data,{merge:true}); }
+async function getListings(cat)      {
+  let q = query(collection(db,"listings"),where("is_active","==",true),orderBy("createdAt","desc"));
+  const snap = await getDocs(q);
+  let all = snap.docs.map(d=>({id:d.id,...d.data()}));
+  if(cat && cat!=="all") all = all.filter(l=>l.category===cat);
+  return all;
+}
+async function getListing(id)        { const s = await getDoc(doc(db,"listings",id)); return s.exists()?{id:s.id,...s.data()}:null; }
+async function createListing(data)   { return addDoc(collection(db,"listings"),{...data,createdAt:serverTimestamp()}); }
+async function updateListing(id,data){ return updateDoc(doc(db,"listings",id),data); }
+async function createOrder(data)     { return addDoc(collection(db,"orders"),{...data,status:"pending",createdAt:serverTimestamp()}); }
+async function updateOrder(id,data)  { return updateDoc(doc(db,"orders",id),data); }
+async function getMyListings(uid)    {
+  const snap = await getDocs(query(collection(db,"listings"),where("farmer_id","==",uid),orderBy("createdAt","desc")));
+  return snap.docs.map(d=>({id:d.id,...d.data()}));
+}
+async function getOrders(uid)        {
+  const [asBuyer,asFarmer] = await Promise.all([
+    getDocs(query(collection(db,"orders"),where("buyer_id","==",uid),orderBy("createdAt","desc"))),
+    getDocs(query(collection(db,"orders"),where("farmer_id","==",uid),orderBy("createdAt","desc"))),
+  ]);
+  const map = {};
+  [...asBuyer.docs,...asFarmer.docs].forEach(d=>{ map[d.id]={id:d.id,...d.data()}; });
+  return Object.values(map).sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+}
+
+/* ── Design tokens ── */
+const C = {
+  bg:"#f8fdf9", card:"#ffffff", border:"#e2ede5",
+  primary:"#166534", primaryFg:"#ffffff",
+  secondary:"#f0fdf4", muted:"#6b7280", text:"#1a2e1d",
+  accent:"#16a34a", accentLight:"#dcfce7",
+  danger:"#dc2626", dangerLight:"#fee2e2",
+  gold:"#d97706", goldLight:"#fef3c7",
+  shadow:"0 1px 3px rgba(0,0,0,0.08),0 1px 2px rgba(0,0,0,0.04)",
+  shadowMd:"0 4px 6px -1px rgba(0,0,0,0.07),0 2px 4px -1px rgba(0,0,0,0.04)",
+};
+
+const CATEGORIES = ["all","cereals","vegetables","fruits","legumes","livestock","seeds","processed"];
+const PROVINCES  = ["Harare","Bulawayo","Manicaland","Mashonaland Central","Mashonaland East","Mashonaland West","Masvingo","Matabeleland North","Matabeleland South","Midlands"];
+
+/* ── Shared styles ── */
+const S = {
+  page:  { minHeight:"100vh", background:C.bg, color:C.text, fontFamily:"'DM Sans','Segoe UI',system-ui,sans-serif" },
+  header:{ background:"rgba(255,255,255,0.85)", backdropFilter:"blur(12px)", borderBottom:`1px solid ${C.border}`, position:"sticky", top:0, zIndex:100 },
+  hInner:{ maxWidth:1100, margin:"0 auto", padding:"0 20px", height:64, display:"flex", alignItems:"center", justifyContent:"space-between" },
+  logo:  { display:"flex", alignItems:"center", gap:8, textDecoration:"none", color:C.text },
+  logoBadge:{ width:36, height:36, borderRadius:10, background:`linear-gradient(135deg,${C.accent},${C.primary})`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18 },
+  logoText:{ fontWeight:800, fontSize:18, letterSpacing:-0.5 },
+  nav:   { display:"flex", alignItems:"center", gap:20 },
+  navLink:{ textDecoration:"none", color:C.muted, fontSize:14, fontWeight:500 },
+  container:{ maxWidth:1100, margin:"0 auto", padding:"0 20px" },
+  section:{ padding:"40px 0" },
+  card:  { background:C.card, border:`1px solid ${C.border}`, borderRadius:16, padding:24, boxShadow:C.shadow },
+  btn:   (v="primary",size="md")=>({
+    display:"inline-flex", alignItems:"center", gap:6, justifyContent:"center",
+    background: v==="primary"?`linear-gradient(135deg,${C.accent},${C.primary})`:v==="outline"?"transparent":v==="danger"?C.danger:"transparent",
+    color: v==="primary"?C.primaryFg:v==="danger"?C.primaryFg:C.primary,
+    border: v==="outline"?`1.5px solid ${C.primary}`:"none",
+    borderRadius:10, padding: size==="lg"?"13px 28px":size==="sm"?"7px 14px":"11px 20px",
+    fontWeight:700, fontSize: size==="lg"?16:size==="sm"?13:14,
+    cursor:"pointer", textDecoration:"none", transition:"opacity .15s, transform .1s",
+    boxShadow: v==="primary"?C.shadowMd:"none",
+  }),
+  input: { width:"100%", padding:"10px 14px", borderRadius:10, border:`1.5px solid ${C.border}`, fontSize:14, outline:"none", background:C.card, color:C.text, boxSizing:"border-box", marginBottom:12 },
+  label: { display:"block", fontSize:12, fontWeight:600, color:C.muted, marginBottom:4, textTransform:"uppercase", letterSpacing:0.5 },
+  badge: (color=C.accent)=>({ background:color+"18", color, borderRadius:20, padding:"3px 10px", fontSize:11, fontWeight:700, display:"inline-block" }),
+};
+
+/* ── Spinner ── */
+const Spinner = ({size=32})=>(
+  <div style={{display:"flex",justifyContent:"center",alignItems:"center",padding:40}}>
+    <div style={{width:size,height:size,borderRadius:"50%",border:`3px solid ${C.border}`,borderTopColor:C.accent,animation:"spin .7s linear infinite"}}/>
+    <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+  </div>
+);
+
+/* ── Toast ── */
+let _toast = null;
+function Toast({msg,type="success"}){
+  return msg?<div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",background:type==="error"?C.danger:C.primary,color:"#fff",padding:"12px 24px",borderRadius:12,fontWeight:600,fontSize:14,zIndex:9999,boxShadow:C.shadowMd,whiteSpace:"nowrap"}}>{msg}</div>:null;
+}
+
+/* ══════════════════════════════════════════════════════════
+   SITE HEADER
+══════════════════════════════════════════════════════════ */
+function SiteHeader({ user, onSignOut, onNav, page }) {
+  const [menuOpen, setMenu] = useState(false);
+  return (
+    <header style={S.header}>
+      <div style={S.hInner}>
+        <a onClick={()=>onNav("home")} style={{...S.logo,cursor:"pointer"}}>
+          <div style={S.logoBadge}>🌿</div>
+          <span style={S.logoText}>AgroLink</span>
+        </a>
+        <nav style={{...S.nav,display:"flex"}}>
+          <a onClick={()=>onNav("market")} style={{...S.navLink,cursor:"pointer",color:page==="market"?C.primary:C.muted}}>Marketplace</a>
+          {user && <>
+            <a onClick={()=>onNav("dashboard")} style={{...S.navLink,cursor:"pointer",color:page==="dashboard"?C.primary:C.muted}}>Dashboard</a>
+            <a onClick={()=>onNav("orders")} style={{...S.navLink,cursor:"pointer",color:page==="orders"?C.primary:C.muted}}>Orders</a>
+          </>}
+        </nav>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {user
+            ? <button style={S.btn("outline","sm")} onClick={onSignOut}>Sign out</button>
+            : <>
+                <button style={S.btn("outline","sm")} onClick={()=>onNav("auth")}>Sign in</button>
+                <button style={S.btn("primary","sm")} onClick={()=>onNav("auth")}>Get started</button>
+              </>
+          }
+        </div>
+      </div>
+    </header>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════
+   HOME / LANDING
+══════════════════════════════════════════════════════════ */
+function HomePage({ onNav }) {
+  const features = [
+    {e:"🌾",t:"List produce in minutes",d:"Upload crops with quantity, quality grade and price. Always in your control."},
+    {e:"📈",t:"Transparent pricing",d:"Compare prices across provinces. Buyers see real supply; farmers see real demand."},
+    {e:"🚛",t:"Logistics ready",d:"Connect with transporters to move produce from farm to market quickly."},
+    {e:"🛡️",t:"Verified profiles",d:"Ratings and reviews build trust — payment reliability, quality, communication."},
+    {e:"🤝",t:"Direct relationships",d:"Skip the middlemen. Build lasting trade partnerships you trust."},
+    {e:"🌱",t:"All categories",d:"Cereals, vegetables, fruits, legumes, livestock, seeds and processed goods."},
+  ];
+  return (
+    <div>
+      {/* Hero */}
+      <section style={{background:`linear-gradient(135deg,${C.secondary} 0%,#fff 100%)`,borderBottom:`1px solid ${C.border}`,padding:"64px 0"}}>
+        <div style={{...S.container,display:"grid",gridTemplateColumns:"1fr 1fr",gap:48,alignItems:"center"}}>
+          <div>
+            <div style={{display:"inline-flex",alignItems:"center",gap:6,background:C.accentLight,color:C.accent,borderRadius:20,padding:"5px 14px",fontSize:12,fontWeight:700,marginBottom:20}}>
+              🌿 The farmer-first marketplace
+            </div>
+            <h1 style={{fontSize:52,fontWeight:900,lineHeight:1.05,letterSpacing:-1.5,margin:"0 0 20px",color:C.text}}>
+              Fresh produce.<br/>
+              <span style={{background:`linear-gradient(135deg,${C.accent},${C.primary})`,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>Direct from the farm.</span>
+            </h1>
+            <p style={{fontSize:18,color:C.muted,lineHeight:1.6,marginBottom:32,maxWidth:480}}>
+              AgroLink connects farmers, buyers, transporters and processors in one transparent marketplace — fair prices, faster payments, no middlemen.
+            </p>
+            <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+              <button style={S.btn("primary","lg")} onClick={()=>onNav("auth")}>Join AgroLink →</button>
+              <button style={S.btn("outline","lg")} onClick={()=>onNav("market")}>Browse marketplace</button>
+            </div>
+          </div>
+          <div style={{background:`linear-gradient(135deg,${C.accentLight},${C.secondary})`,borderRadius:24,aspectRatio:"4/3",display:"flex",alignItems:"center",justifyContent:"center",fontSize:80}}>
+            🌽
+          </div>
+        </div>
+      </section>
+
+      {/* Features */}
+      <section style={{...S.section,background:`linear-gradient(180deg,${C.secondary},${C.bg})`}}>
+        <div style={S.container}>
+          <div style={{textAlign:"center",marginBottom:48}}>
+            <h2 style={{fontSize:36,fontWeight:800,letterSpacing:-0.5,marginBottom:12}}>Built for everyone in the supply chain</h2>
+            <p style={{color:C.muted,fontSize:16}}>From smallholder farms to wholesale buyers, AgroLink makes agricultural trade easier.</p>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:20}}>
+            {features.map(f=>(
+              <div key={f.t} style={{...S.card,transition:"box-shadow .2s"}}
+                onMouseOver={e=>e.currentTarget.style.boxShadow=C.shadowMd}
+                onMouseOut={e=>e.currentTarget.style.boxShadow=C.shadow}>
+                <div style={{fontSize:28,marginBottom:12}}>{f.e}</div>
+                <div style={{fontWeight:700,fontSize:16,marginBottom:6}}>{f.t}</div>
+                <div style={{color:C.muted,fontSize:14,lineHeight:1.6}}>{f.d}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Who it's for */}
+      <section style={S.section}>
+        <div style={{...S.container,display:"grid",gridTemplateColumns:"1fr 1fr",gap:40,alignItems:"center"}}>
+          <div>
+            <h2 style={{fontSize:36,fontWeight:800,letterSpacing:-0.5,marginBottom:12}}>Who AgroLink is for</h2>
+            <p style={{color:C.muted,fontSize:16,lineHeight:1.6}}>A unified marketplace for every role in the agricultural supply chain across Zimbabwe.</p>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            {["Farmers","Buyers","Wholesalers","Agro-processors","Exporters","Transporters","Agro-dealers","Organisations"].map(u=>(
+              <div key={u} style={{...S.card,padding:"12px 16px",fontSize:14,fontWeight:600}}>{u}</div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* CTA */}
+      <section style={{padding:"0 0 60px"}}>
+        <div style={S.container}>
+          <div style={{background:`linear-gradient(135deg,${C.accent},${C.primary})`,borderRadius:24,padding:60,textAlign:"center",color:"#fff"}}>
+            <h2 style={{fontSize:36,fontWeight:800,marginBottom:12}}>Ready to grow your trade?</h2>
+            <p style={{opacity:.85,fontSize:16,marginBottom:28}}>Create your free account and start listing or buying produce today.</p>
+            <button style={{...S.btn("primary"),background:"#fff",color:C.primary,boxShadow:C.shadowMd}} onClick={()=>onNav("auth")}>Get started free</button>
+          </div>
+        </div>
+      </section>
+
+      <footer style={{borderTop:`1px solid ${C.border}`,padding:"24px 0",textAlign:"center",color:C.muted,fontSize:13}}>
+        © {new Date().getFullYear()} AgroLink Zimbabwe · Connecting farmers and buyers.
+      </footer>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════
+   AUTH
+══════════════════════════════════════════════════════════ */
+function AuthPage({ onLogin, onNav }) {
+  const [tab,    setTab]   = useState("signin");
+  const [email,  setEmail] = useState("");
+  const [pass,   setPass]  = useState("");
+  const [name,   setName]  = useState("");
+  const [role,   setRole]  = useState("farmer");
+  const [prov,   setProv]  = useState(PROVINCES[0]);
+  const [busy,   setBusy]  = useState(false);
+  const [err,    setErr]   = useState("");
+  const [reset,  setReset] = useState(false);
+
+  async function handleSignIn(e) {
+    e.preventDefault(); setErr(""); setBusy(true);
+    try {
+      const cred = await signInWithEmailAndPassword(auth,email,pass);
+      const p    = await getProfile(cred.user.uid);
+      onLogin(cred.user, p||{});
+    } catch(e) { setErr("Wrong email or password."); }
+    setBusy(false);
+  }
+
+  async function handleSignUp(e) {
+    e.preventDefault(); setErr(""); setBusy(true);
+    try {
+      const cred = await createUserWithEmailAndPassword(auth,email,pass);
+      const p    = { name:name.trim(), role, province:prov, email, createdAt:new Date().toISOString() };
+      await saveProfile(cred.user.uid, p);
+      onLogin(cred.user, p);
+    } catch(e) {
+      setErr(e.code==="auth/email-already-in-use"?"Email already registered. Sign in instead.":e.message);
+    }
+    setBusy(false);
+  }
+
+  async function handleReset() {
+    if(!email){ setErr("Enter your email first."); return; }
+    setBusy(true);
+    try { await sendPasswordResetEmail(auth,email); setReset(true); setErr(""); }
+    catch(e){ setErr("Could not send reset email."); }
+    setBusy(false);
+  }
+
+  return (
+    <div style={{minHeight:"100vh",background:`linear-gradient(135deg,${C.secondary},${C.bg})`,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <div style={{width:"100%",maxWidth:420}}>
+        <a onClick={()=>onNav("home")} style={{...S.logo,justifyContent:"center",marginBottom:32,cursor:"pointer"}}>
+          <div style={S.logoBadge}>🌿</div>
+          <span style={S.logoText}>AgroLink</span>
+        </a>
+
+        <div style={S.card}>
+          {/* Tabs */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,background:C.secondary,borderRadius:10,padding:4,marginBottom:24}}>
+            {["signin","signup"].map(t=>(
+              <button key={t} onClick={()=>{setTab(t);setErr("");setReset(false);}} style={{
+                padding:"9px",borderRadius:8,border:"none",fontWeight:700,fontSize:14,cursor:"pointer",
+                background:tab===t?C.card:undefined,color:tab===t?C.primary:C.muted,
+                boxShadow:tab===t?C.shadow:undefined,
+              }}>{t==="signin"?"Sign in":"Create account"}</button>
+            ))}
+          </div>
+
+          {tab==="signin" && (
+            <form onSubmit={handleSignIn}>
+              <label style={S.label}>Email</label>
+              <input style={S.input} type="email" value={email} onChange={e=>setEmail(e.target.value)} required />
+              <label style={S.label}>Password</label>
+              <input style={S.input} type="password" value={pass} onChange={e=>setPass(e.target.value)} required />
+              {err&&<div style={{color:C.danger,fontSize:13,marginBottom:10}}>{err}</div>}
+              <button type="submit" style={{...S.btn("primary"),width:"100%",marginBottom:10}} disabled={busy}>
+                {busy?"Please wait…":"Sign in"}
+              </button>
+              <div style={{textAlign:"center"}}>
+                {reset
+                  ? <div style={{color:C.accent,fontSize:13}}>✅ Reset email sent! Check your inbox.</div>
+                  : <button type="button" onClick={handleReset} disabled={busy} style={{background:"none",border:"none",color:C.muted,fontSize:13,cursor:"pointer",textDecoration:"underline"}}>Forgot password?</button>
+                }
+              </div>
+            </form>
+          )}
+
+          {tab==="signup" && (
+            <form onSubmit={handleSignUp}>
+              <label style={S.label}>Full Name</label>
+              <input style={S.input} value={name} onChange={e=>setName(e.target.value)} placeholder="Your name" required />
+              <label style={S.label}>Email</label>
+              <input style={S.input} type="email" value={email} onChange={e=>setEmail(e.target.value)} required />
+              <label style={S.label}>Password (min 6 characters)</label>
+              <input style={S.input} type="password" value={pass} onChange={e=>setPass(e.target.value)} required />
+              <label style={S.label}>I am a…</label>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:12}}>
+                {["farmer","buyer","transporter"].map(r=>(
+                  <button type="button" key={r} onClick={()=>setRole(r)} style={{
+                    padding:"9px 4px",borderRadius:8,border:`2px solid ${role===r?C.primary:C.border}`,
+                    background:role===r?C.accentLight:"transparent",color:role===r?C.primary:C.muted,
+                    fontWeight:700,cursor:"pointer",fontSize:13,textTransform:"capitalize",
+                  }}>{r==="farmer"?"🌾 Farmer":r==="buyer"?"🛒 Buyer":"🚛 Transport"}</button>
+                ))}
+              </div>
+              <label style={S.label}>Province</label>
+              <select style={{...S.input,appearance:"none"}} value={prov} onChange={e=>setProv(e.target.value)}>
+                {PROVINCES.map(p=><option key={p}>{p}</option>)}
+              </select>
+              {err&&<div style={{color:C.danger,fontSize:13,marginBottom:10}}>{err}</div>}
+              <button type="submit" style={{...S.btn("primary"),width:"100%"}} disabled={busy}>
+                {busy?"Creating account…":"Create account"}
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════
+   MARKETPLACE
+══════════════════════════════════════════════════════════ */
+function MarketplacePage({ onNav, onViewListing }) {
+  const [cat,      setCat]      = useState("all");
+  const [q,        setQ]        = useState("");
+  const [listings, setListings] = useState([]);
+  const [loading,  setLoad]     = useState(true);
+
+  useEffect(()=>{ setLoad(true); getListings(cat).then(l=>{setListings(l);setLoad(false);}); },[cat]);
+
+  const filtered = useMemo(()=>{
+    const t = q.trim().toLowerCase();
+    if(!t) return listings;
+    return listings.filter(l=>l.title?.toLowerCase().includes(t)||l.location?.toLowerCase().includes(t));
+  },[listings,q]);
+
+  return (
+    <div>
+      <section style={{background:`linear-gradient(135deg,${C.secondary},${C.bg})`,borderBottom:`1px solid ${C.border}`,padding:"40px 0 24px"}}>
+        <div style={S.container}>
+          <h1 style={{fontSize:36,fontWeight:800,marginBottom:4}}>Marketplace</h1>
+          <p style={{color:C.muted,marginBottom:24}}>Fresh produce from verified farmers across Zimbabwe.</p>
+          <div style={{position:"relative",marginBottom:16}}>
+            <span style={{position:"absolute",left:14,top:"50%",transform:"translateY(-50%)",fontSize:16}}>🔍</span>
+            <input style={{...S.input,paddingLeft:42,marginBottom:0}} placeholder="Search produce, location…" value={q} onChange={e=>setQ(e.target.value)} />
+          </div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {CATEGORIES.map(c=>(
+              <button key={c} onClick={()=>setCat(c)} style={{
+                padding:"7px 16px",borderRadius:20,border:`1.5px solid ${cat===c?C.primary:C.border}`,
+                background:cat===c?C.accentLight:"transparent",color:cat===c?C.primary:C.muted,
+                fontSize:13,fontWeight:600,cursor:"pointer",textTransform:"capitalize",
+              }}>{c}</button>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section style={S.section}>
+        <div style={S.container}>
+          {loading ? <Spinner/> : filtered.length===0 ? (
+            <div style={{...S.card,textAlign:"center",padding:60}}>
+              <div style={{fontSize:48,marginBottom:12}}>📦</div>
+              <h3 style={{fontWeight:700,marginBottom:8}}>No listings yet</h3>
+              <p style={{color:C.muted,marginBottom:20}}>Be the first to list produce in this category.</p>
+              <button style={S.btn("primary")} onClick={()=>onNav("new-listing")}>List produce</button>
+            </div>
+          ) : (
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:20}}>
+              {filtered.map(l=>(
+                <div key={l.id} style={{...S.card,padding:0,overflow:"hidden",cursor:"pointer",transition:"box-shadow .2s"}}
+                  onClick={()=>onViewListing(l)}
+                  onMouseOver={e=>e.currentTarget.style.boxShadow=C.shadowMd}
+                  onMouseOut={e=>e.currentTarget.style.boxShadow=C.shadow}>
+                  <div style={{aspectRatio:"4/3",background:C.secondary,display:"flex",alignItems:"center",justifyContent:"center",fontSize:48,overflow:"hidden"}}>
+                    {l.image_url
+                      ? <img src={l.image_url} alt={l.title} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                      : "🌾"}
+                  </div>
+                  <div style={{padding:16}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+                      <div style={{fontWeight:700,fontSize:16}}>{l.title}</div>
+                      <span style={S.badge(C.accent)}>{l.category}</span>
+                    </div>
+                    <div style={{color:C.muted,fontSize:13,marginBottom:10}}>📍 {l.location}</div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+                      <div><span style={{fontSize:22,fontWeight:800,color:C.primary}}>${Number(l.price_per_unit).toFixed(2)}</span><span style={{color:C.muted,fontSize:12}}>/{l.unit}</span></div>
+                      <span style={{color:C.muted,fontSize:12}}>{l.quantity} {l.unit} avail.</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════
+   LISTING DETAIL
+══════════════════════════════════════════════════════════ */
+function ListingDetailPage({ listing: initialListing, user, profile, onBack, onNav }) {
+  const [listing, setListing] = useState(initialListing);
+  const [farmer,  setFarmer]  = useState(null);
+  const [qty,     setQty]     = useState(1);
+  const [loc,     setLoc]     = useState("");
+  const [notes,   setNotes]   = useState("");
+  const [busy,    setBusy]    = useState(false);
+  const [done,    setDone]    = useState(false);
+  const [toast,   setToast]   = useState(null);
+
+  useEffect(()=>{
+    if(listing?.farmer_id) getProfile(listing.farmer_id).then(setFarmer);
+  },[listing]);
+
+  function showToast(msg,type="success"){ setToast({msg,type}); setTimeout(()=>setToast(null),3000); }
+
+  async function placeOrder() {
+    if(!user){ onNav("auth"); return; }
+    if(qty<=0||qty>Number(listing.quantity)){ showToast(`Quantity must be 1–${listing.quantity}`,"error"); return; }
+    setBusy(true);
+    try {
+      await createOrder({
+        buyer_id:          user.uid,
+        farmer_id:         listing.farmer_id,
+        listing_id:        listing.id,
+        listing_title:     listing.title,
+        listing_unit:      listing.unit,
+        quantity:          qty,
+        unit_price:        listing.price_per_unit,
+        total_price:       Number(listing.price_per_unit)*qty,
+        delivery_location: loc||null,
+        notes:             notes||null,
+        buyer_name:        profile?.name||"Buyer",
+        farmer_name:       farmer?.name||"Farmer",
+      });
+      setDone(true);
+      showToast("Order placed! Check your orders page.");
+    } catch(e){ showToast(e.message,"error"); }
+    setBusy(false);
+  }
+
+  const total = Number(listing?.price_per_unit||0)*qty;
+
+  return (
+    <div>
+      {toast&&<Toast msg={toast.msg} type={toast.type}/>}
+      <div style={{borderBottom:`1px solid ${C.border}`,padding:"12px 0"}}>
+        <div style={S.container}>
+          <button onClick={onBack} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:14,display:"flex",alignItems:"center",gap:4}}>← Back to marketplace</button>
+        </div>
+      </div>
+      <div style={{...S.container,padding:"32px 20px"}}>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:32,alignItems:"start"}}>
+          {/* Image */}
+          <div style={{borderRadius:20,overflow:"hidden",background:C.secondary,aspectRatio:"4/3",display:"flex",alignItems:"center",justifyContent:"center",fontSize:80}}>
+            {listing.image_url
+              ? <img src={listing.image_url} alt={listing.title} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+              : "🌾"}
+          </div>
+          {/* Info */}
+          <div>
+            <div style={{display:"flex",gap:8,marginBottom:12}}>
+              <span style={S.badge(C.accent)}>{listing.category}</span>
+              {listing.quality&&<span style={S.badge(C.gold)}>{listing.quality.replace("_"," ")}</span>}
+            </div>
+            <h1 style={{fontSize:32,fontWeight:800,marginBottom:8}}>{listing.title}</h1>
+            <p style={{color:C.muted,fontSize:14,marginBottom:12}}>📍 {listing.location}</p>
+            {listing.description&&<p style={{color:C.muted,lineHeight:1.6,marginBottom:16}}>{listing.description}</p>}
+            <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:20}}>
+              <span style={{fontSize:40,fontWeight:900,color:C.primary}}>${Number(listing.price_per_unit).toFixed(2)}</span>
+              <span style={{color:C.muted}}>/{listing.unit}</span>
+              <span style={{marginLeft:"auto",color:C.muted,fontSize:14}}>{listing.quantity} {listing.unit} available</span>
+            </div>
+            {farmer&&(
+              <div style={{...S.card,marginBottom:16,padding:16}}>
+                <div style={{fontSize:11,fontWeight:600,color:C.muted,textTransform:"uppercase",letterSpacing:0.5,marginBottom:4}}>Sold by</div>
+                <div style={{fontWeight:700}}>{farmer.name||"Farmer"}</div>
+                {farmer.province&&<div style={{color:C.muted,fontSize:13}}>📍 {farmer.province}</div>}
+              </div>
+            )}
+            {/* Order form */}
+            {done ? (
+              <div style={{...S.card,textAlign:"center",padding:32}}>
+                <div style={{fontSize:40,marginBottom:8}}>✅</div>
+                <div style={{fontWeight:700,marginBottom:4}}>Order placed!</div>
+                <div style={{color:C.muted,fontSize:14,marginBottom:16}}>Check your orders page for status updates.</div>
+                <button style={S.btn("primary")} onClick={()=>onNav("orders")}>View orders</button>
+              </div>
+            ) : (
+              <div style={S.card}>
+                <div style={{fontWeight:700,fontSize:16,marginBottom:16}}>Place an order</div>
+                <label style={S.label}>Quantity ({listing.unit})</label>
+                <input style={S.input} type="number" min={1} max={listing.quantity} value={qty} onChange={e=>setQty(parseInt(e.target.value)||1)}/>
+                <label style={S.label}>Delivery location</label>
+                <input style={S.input} value={loc} onChange={e=>setLoc(e.target.value)} placeholder="Where to deliver"/>
+                <label style={S.label}>Notes (optional)</label>
+                <textarea style={{...S.input,height:72,resize:"none"}} value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Any special requirements…"/>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",borderTop:`1px solid ${C.border}`,paddingTop:12,marginBottom:12}}>
+                  <span style={{color:C.muted,fontSize:14}}>Total</span>
+                  <span style={{fontSize:28,fontWeight:800}}>${total.toFixed(2)}</span>
+                </div>
+                <button style={{...S.btn("primary"),width:"100%"}} onClick={placeOrder} disabled={busy}>
+                  {busy?"Placing order…":user?"Place order":"Sign in to order"}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════
+   DASHBOARD
+══════════════════════════════════════════════════════════ */
+function DashboardPage({ user, profile, onNav }) {
+  const [myListings,     setMyListings]     = useState([]);
+  const [incomingOrders, setIncomingOrders] = useState([]);
+  const [loading,        setLoad]           = useState(true);
+
+  useEffect(()=>{
+    Promise.all([getMyListings(user.uid), getOrders(user.uid)]).then(([listings,orders])=>{
+      setMyListings(listings);
+      setIncomingOrders(orders.filter(o=>o.farmer_id===user.uid));
+      setLoad(false);
+    });
+  },[]);
+
+  async function toggleActive(id,current){ await updateListing(id,{is_active:!current}); setMyListings(prev=>prev.map(l=>l.id===id?{...l,is_active:!current}:l)); }
+
+  const revenue = incomingOrders.reduce((s,o)=>s+Number(o.total_price||0),0);
+
+  return (
+    <div>
+      <section style={{background:`linear-gradient(135deg,${C.secondary},${C.bg})`,borderBottom:`1px solid ${C.border}`,padding:"40px 0 24px"}}>
+        <div style={S.container}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",flexWrap:"wrap",gap:16}}>
+            <div>
+              <h1 style={{fontSize:36,fontWeight:800,marginBottom:4}}>Your dashboard</h1>
+              <p style={{color:C.muted}}>Manage listings and track activity.</p>
+            </div>
+            <button style={S.btn("primary")} onClick={()=>onNav("new-listing")}>+ New listing</button>
+          </div>
+          {/* Stats */}
+          {loading?<Spinner/>:(
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16,marginTop:24}}>
+              {[
+                {e:"📦",label:"Active listings",v:myListings.filter(l=>l.is_active).length},
+                {e:"🛒",label:"Incoming orders",v:incomingOrders.length},
+                {e:"💰",label:"Revenue",v:`$${revenue.toFixed(2)}`},
+              ].map(s=>(
+                <div key={s.label} style={S.card}>
+                  <div style={{display:"flex",alignItems:"center",gap:12}}>
+                    <div style={{width:44,height:44,borderRadius:12,background:C.secondary,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22}}>{s.e}</div>
+                    <div>
+                      <div style={{fontSize:11,color:C.muted,fontWeight:600,textTransform:"uppercase",letterSpacing:0.5}}>{s.label}</div>
+                      <div style={{fontSize:24,fontWeight:800,color:C.primary}}>{s.v}</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section style={S.section}>
+        <div style={S.container}>
+          <h2 style={{fontSize:22,fontWeight:700,marginBottom:16}}>Your listings</h2>
+          {loading?<Spinner/>:myListings.length===0?(
+            <div style={{...S.card,textAlign:"center",padding:48}}>
+              <div style={{fontSize:48,marginBottom:12}}>📦</div>
+              <p style={{color:C.muted,marginBottom:16}}>You haven't listed any produce yet.</p>
+              <button style={S.btn("primary")} onClick={()=>onNav("new-listing")}>List your first produce</button>
+            </div>
+          ):(
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:16}}>
+              {myListings.map(l=>(
+                <div key={l.id} style={{...S.card,padding:0,overflow:"hidden"}}>
+                  <div style={{aspectRatio:"4/3",background:C.secondary,display:"flex",alignItems:"center",justifyContent:"center",fontSize:40,overflow:"hidden"}}>
+                    {l.image_url?<img src={l.image_url} alt={l.title} style={{width:"100%",height:"100%",objectFit:"cover"}}/>:"🌾"}
+                  </div>
+                  <div style={{padding:16}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                      <div style={{fontWeight:700}}>{l.title}</div>
+                      <span style={S.badge(l.is_active?C.accent:C.muted)}>{l.is_active?"Active":"Paused"}</span>
+                    </div>
+                    <div style={{color:C.muted,fontSize:13,marginBottom:10}}>📍 {l.location}</div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span style={{fontWeight:700,color:C.primary}}>${Number(l.price_per_unit).toFixed(2)}<span style={{color:C.muted,fontWeight:400,fontSize:12}}>/{l.unit}</span></span>
+                      <button style={S.btn("outline","sm")} onClick={()=>toggleActive(l.id,l.is_active)}>
+                        {l.is_active?"Pause":"Activate"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════
+   NEW LISTING
+══════════════════════════════════════════════════════════ */
+function NewListingPage({ user, profile, onNav }) {
+  const [form,setForm] = useState({
+    title:"",description:"",category:"vegetables",quality:"standard",
+    quantity:"",unit:"kg",price_per_unit:"",location:profile?.province||"",
+    image_url:"",packaging:"",
+  });
+  const [busy,setBusy] = useState(false);
+  const [err,setErr]   = useState("");
+  const upd = k => e => setForm({...form,[k]:e.target.value});
+
+  async function submit(e){
+    e.preventDefault(); setErr(""); setBusy(true);
+    try{
+      await createListing({
+        farmer_id:   user.uid,
+        farmer_name: profile?.name||"Farmer",
+        is_active:   true,
+        title:       form.title,
+        description: form.description||null,
+        category:    form.category,
+        quality:     form.quality,
+        quantity:    parseFloat(form.quantity),
+        unit:        form.unit,
+        price_per_unit: parseFloat(form.price_per_unit),
+        location:    form.location,
+        image_url:   form.image_url||null,
+        packaging:   form.packaging||null,
+      });
+      onNav("dashboard");
+    }catch(e){ setErr(e.message); }
+    setBusy(false);
+  }
+
+  return (
+    <div style={{...S.container,maxWidth:640,padding:"40px 20px"}}>
+      <h1 style={{fontSize:32,fontWeight:800,marginBottom:4}}>New listing</h1>
+      <p style={{color:C.muted,marginBottom:32}}>Tell buyers about your produce.</p>
+      <form onSubmit={submit} style={S.card}>
+        <label style={S.label}>Title *</label>
+        <input style={S.input} value={form.title} onChange={upd("title")} placeholder="e.g. Fresh tomatoes — Roma" required/>
+        <label style={S.label}>Description</label>
+        <textarea style={{...S.input,height:80,resize:"none"}} value={form.description} onChange={upd("description")} placeholder="Optional details about your produce"/>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+          <div>
+            <label style={S.label}>Category</label>
+            <select style={{...S.input,appearance:"none"}} value={form.category} onChange={upd("category")}>
+              {["cereals","vegetables","fruits","legumes","livestock","seeds","processed"].map(c=><option key={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={S.label}>Quality</label>
+            <select style={{...S.input,appearance:"none"}} value={form.quality} onChange={upd("quality")}>
+              <option value="premium">Premium</option>
+              <option value="grade_a">Grade A</option>
+              <option value="grade_b">Grade B</option>
+              <option value="standard">Standard</option>
+            </select>
+          </div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+          <div>
+            <label style={S.label}>Quantity *</label>
+            <input style={S.input} type="number" min={0} step="0.01" value={form.quantity} onChange={upd("quantity")} required/>
+          </div>
+          <div>
+            <label style={S.label}>Unit</label>
+            <input style={S.input} value={form.unit} onChange={upd("unit")} placeholder="kg, bag, crate"/>
+          </div>
+          <div>
+            <label style={S.label}>Price/unit (USD) *</label>
+            <input style={S.input} type="number" min={0} step="0.01" value={form.price_per_unit} onChange={upd("price_per_unit")} required/>
+          </div>
+        </div>
+        <label style={S.label}>Location *</label>
+        <input style={S.input} value={form.location} onChange={upd("location")} placeholder="District, province" required/>
+        <label style={S.label}>Image URL (optional)</label>
+        <input style={S.input} value={form.image_url} onChange={upd("image_url")} placeholder="https://…"/>
+        <label style={S.label}>Packaging (optional)</label>
+        <input style={S.input} value={form.packaging} onChange={upd("packaging")} placeholder="50kg sacks, 20kg crates…"/>
+        {err&&<div style={{color:C.danger,fontSize:13,marginBottom:10}}>{err}</div>}
+        <div style={{display:"flex",gap:10}}>
+          <button type="button" style={{...S.btn("outline"),flex:1}} onClick={()=>onNav("dashboard")}>Cancel</button>
+          <button type="submit" style={{...S.btn("primary"),flex:2}} disabled={busy}>{busy?"Publishing…":"Publish listing"}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════
+   ORDERS
+══════════════════════════════════════════════════════════ */
+function OrdersPage({ user }) {
+  const [orders, setOrders] = useState([]);
+  const [loading,setLoad]   = useState(true);
+
+  useEffect(()=>{ getOrders(user.uid).then(o=>{setOrders(o);setLoad(false);}); },[]);
+
+  async function updateStatus(id,status){
+    await updateOrder(id,{status});
+    setOrders(prev=>prev.map(o=>o.id===id?{...o,status}:o));
+  }
+
+  const statusBadge = {pending:C.gold,confirmed:C.accent,in_transit:C.accent,delivered:C.primary,cancelled:C.danger};
+
+  return (
+    <div>
+      <section style={{background:`linear-gradient(135deg,${C.secondary},${C.bg})`,borderBottom:`1px solid ${C.border}`,padding:"40px 0 24px"}}>
+        <div style={S.container}>
+          <h1 style={{fontSize:36,fontWeight:800,marginBottom:4}}>Orders</h1>
+          <p style={{color:C.muted}}>All your buying and selling activity.</p>
+        </div>
+      </section>
+      <section style={S.section}>
+        <div style={S.container}>
+          {loading?<Spinner/>:orders.length===0?(
+            <div style={{...S.card,textAlign:"center",padding:48}}>
+              <div style={{fontSize:48,marginBottom:12}}>🛒</div>
+              <p style={{color:C.muted}}>No orders yet.</p>
+            </div>
+          ):(
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              {orders.map(o=>{
+                const isFarmer = o.farmer_id===user.uid;
+                return (
+                  <div key={o.id} style={{...S.card,display:"flex",gap:16,alignItems:"center",padding:16}}>
+                    <div style={{width:64,height:64,borderRadius:12,background:C.secondary,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,flexShrink:0}}>🌾</div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                        <div style={{fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{o.listing_title||"Listing"}</div>
+                        <span style={S.badge(statusBadge[o.status]||C.muted)}>{(o.status||"pending").replace("_"," ")}</span>
+                      </div>
+                      <div style={{color:C.muted,fontSize:13}}>
+                        {o.quantity} {o.listing_unit} · ${Number(o.total_price).toFixed(2)} · {isFarmer?"Incoming order":"Your order"}
+                      </div>
+                      {o.delivery_location&&<div style={{color:C.muted,fontSize:12,marginTop:2}}>📍 {o.delivery_location}</div>}
+                    </div>
+                    {isFarmer&&o.status!=="delivered"&&o.status!=="cancelled"&&(
+                      <select value={o.status} onChange={e=>updateStatus(o.id,e.target.value)}
+                        style={{padding:"7px 10px",borderRadius:8,border:`1.5px solid ${C.border}`,fontSize:13,background:C.card,color:C.text,cursor:"pointer"}}>
+                        <option value="pending">Pending</option>
+                        <option value="confirmed">Confirmed</option>
+                        <option value="in_transit">In transit</option>
+                        <option value="delivered">Delivered</option>
+                        <option value="cancelled">Cancelled</option>
+                      </select>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════
+   MAIN APP
+══════════════════════════════════════════════════════════ */
+export default function AgroLinkZimbabwe() {
+  const [fbUser,   setFbUser]  = useState(undefined);
+  const [profile,  setProfile] = useState(null);
+  const [page,     setPage]    = useState("home");
+  const [listing,  setListing] = useState(null);
+
+  useEffect(()=>{
+    return onAuthStateChanged(auth, async u=>{
+      setFbUser(u);
+      if(u){ const p=await getProfile(u.uid); setProfile(p); }
+      else setProfile(null);
+    });
+  },[]);
+
+  function nav(p){ setPage(p); window.scrollTo(0,0); }
+
+  function handleLogin(u,p){ setFbUser(u); setProfile(p); nav("market"); }
+
+  async function handleSignOut(){ await firebaseSignOut(auth); nav("home"); }
+
+  function viewListing(l){ setListing(l); nav("listing-detail"); }
+
+  if(fbUser===undefined) return <div style={{...S.page,display:"flex",alignItems:"center",justifyContent:"center"}}><Spinner/></div>;
+
+  const requireAuth = ["dashboard","new-listing","orders"].includes(page) && !fbUser;
+  if(requireAuth){ nav("auth"); }
+
+  return (
+    <div style={S.page}>
+      {page!=="auth" && (
+        <SiteHeader user={fbUser} onSignOut={handleSignOut} onNav={nav} page={page}/>
+      )}
+
+      {page==="home"          && <HomePage onNav={nav}/>}
+      {page==="auth"          && <AuthPage onLogin={handleLogin} onNav={nav}/>}
+      {page==="market"        && <MarketplacePage onNav={nav} onViewListing={viewListing}/>}
+      {page==="listing-detail"&& listing && <ListingDetailPage listing={listing} user={fbUser} profile={profile} onBack={()=>nav("market")} onNav={nav}/>}
+      {page==="dashboard"     && fbUser && <DashboardPage user={fbUser} profile={profile} onNav={nav}/>}
+      {page==="new-listing"   && fbUser && <NewListingPage user={fbUser} profile={profile} onNav={nav}/>}
+      {page==="orders"        && fbUser && <OrdersPage user={fbUser}/>}
+    </div>
+  );
+}
